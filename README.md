@@ -1,7 +1,7 @@
 # Machine Learning-Based Prediction of Dry Eye Disease from Lifestyle and Ocular Metrics
 
 **Author:** Harshini Muthukumar  
-**Date:** April 12, 2025
+**Date:** December 12, 2025
 
 ---
 
