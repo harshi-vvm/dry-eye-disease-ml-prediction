@@ -1,0 +1,881 @@
+---
+title: "Machine Learning-Based Prediction of Dry Eye Disease from Lifestyle and Ocular Metrics"
+date: "12-04-2025"
+author: "Harshini Muthukumar"
+output:
+  html_document:
+    df_print: paged
+    html_document: null
+    toc: true
+    toc_float: true
+    toc_depth: 3
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+---
+
+## Introduction
+
+**Dry Eye Disease (DED)** is a common ocular condition influenced by behavioral, lifestyle, and environmental factors. This project uses a structured dataset containing key variables such as sleep quality, sleep duration, screen time, eye strain, itchiness, eye redness, and blue-light filter usage to build predictive models for DED diagnosis. The dataset includes subjects aged 18 to 45, allowing analysis of patterns associated with ocular surface health.
+
+Beyond detecting DED, the dataset also provides opportunities to study additional sleep-related disorders—such as insomniavthat may be linked to ocular surface diseases (OSD).
+
+### Primary Goal
+
+The primary goal of this project is to develop **accurate and interpretable machine learning models for predicting the presence of Dry Eye Disease (DED)** based on lifestyle and ocular-related attributes. The project focuses on identifying key predictors that contribute to DED, evaluating the impact of sleep patterns and screen usage on ocular health, and comparing the performance of multiple machine learning models to determine the most effective diagnostic tool. Additionally, an ensemble modeling approach is employed to improve predictive performance and achieve a more balanced and reliable classification.
+
+The source of the dataset is: 
+
+
+## Data Acquisition
+
+
+```{r,load_package,echo=FALSE}
+suppressWarnings(suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(corrplot)
+  library(caret)
+  library(randomForest)
+  library(xgboost)
+}))
+
+
+```
+
+```{r,load_data,echo=FALSE}
+ded <- read.csv("https://raw.githubusercontent.com/harshi-vvm/dry_eye_dataset/refs/heads/main/Dry_Eye_Dataset.csv", stringsAsFactors = FALSE)
+
+# Dimensions
+#dim(ded)
+
+```
+
+
+```{r,convert_factor,echo=FALSE}
+
+ded <- ded %>%
+  mutate(across(where(is.character), as.factor))
+
+#str(ded)
+
+```
+
+
+## Data Exploration
+
+
+### Separating Blood Pressure Into Systolic and Diastolic Numeric Features
+
+```{r,sep_bp,echo=TRUE}
+
+ded <- ded %>%
+  mutate(Blood.pressure = as.character(Blood.pressure),
+         Systolic = as.numeric(sub("/.*", "", Blood.pressure)),       
+         Diastolic = as.numeric(sub(".*/", "", Blood.pressure))) %>%  
+  select(-Blood.pressure)  
+
+# Check result
+#str(ded[, c("Systolic", "Diastolic")])
+summary(ded$Systolic)
+summary(ded$Diastolic)
+
+```
+
+
+
+### Creating BMI as a Derived Feature From Height and Weight
+
+```{r,bmi,echo=TRUE}
+ded <- ded %>%
+  mutate(BMI = Weight / ( (Height/100)^2 ))
+#str(ded)
+```
+
+### Visulaization
+
+### Plot 1 - Distribution of Dry Eye Disease
+
+```{r,ded,echo=FALSE}
+
+ggplot(ded, aes(x = Dry.Eye.Disease)) +
+  geom_bar(fill = c("skyblue","salmon")) +
+  labs(title = "Distribution of Dry Eye Disease",
+       x = "DED (N/Y)", y = "Count")
+```
+
+This dataset is clearly **imbalanced with approximately 14,000 cases of Dry Eye Disease (Y) compared to only 7,000 cases without** it (N)- a 2:1 ratio. This imbalance can cause machine learning models to bias toward predicting the majority class, achieving high overall accuracy while performing poorly on the minority class. **To address this, you should consider techniques like class weighting, resampling methods (SMOTE, oversampling, or undersampling)**, and using evaluation metrics beyond accuracy such as precision, recall, F1-score, and AUC-ROC that better reflect performance on both classes.
+
+### Plot 2 - Sleep Disorder vs Dry Eye Disease
+
+```{r,sleep_plot,echo=FALSE}
+
+# Calculate percentages
+sleep_ded_summary <- ded %>%
+  group_by(Sleep.disorder, Dry.Eye.Disease) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(Sleep.disorder) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Create stacked percentage bar chart
+ggplot(sleep_ded_summary, aes(x = Sleep.disorder, y = percentage, fill = Dry.Eye.Disease)) +
+  geom_bar(stat = "identity", position = "fill") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), 
+            position = position_fill(vjust = 0.5)) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(title = "Sleep Disorder vs Dry Eye Disease",
+       x = "Sleep Disorder",
+       y = "Percentage",
+       fill = "Dry Eye Disease") +
+  theme_minimal()
+```
+
+
+### Plot 3 - Distribution of BMI Across Dry Eye Disease Groups
+
+```{r,box_plot,echo=FALSE}
+ggplot(ded, aes(x = Dry.Eye.Disease, y = BMI, fill = Dry.Eye.Disease)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Distribution of BMI Across Dry Eye Disease Groups",
+    x = "Dry Eye Disease Status",
+    y = "BMI"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+### Correlation
+
+```{r,corr,echo=FALSE}
+# Select only numeric variables
+numeric_ded <- ded[, sapply(ded, is.numeric)]
+corr_matrix <- cor(numeric_ded, use = "complete.obs")
+#print(corr_matrix)
+
+ded <- ded %>% select(-Height, -Weight)
+```
+
+
+```{r,corr_plot,echo=FALSE}
+corrplot(corr_matrix, 
+         method = "color",
+         type = "upper",
+         tl.col = "black",
+         tl.cex = 0.8,
+         number.cex = 0.6,
+         addCoef.col = "black")  # shows correlation values
+```
+
+
+
+### Chi-square Analysis
+
+```{r,chi_square,echo=FALSE}
+# Select only factor columns (categorical variables)
+factor_cols <- names(ded)[sapply(ded, is.factor)]
+
+# Remove the target variable from predictors
+factor_cols <- setdiff(factor_cols, "Dry.Eye.Disease")
+
+# Initialize a data frame to store results
+chi_results <- data.frame(
+  Variable = character(),
+  Chi_Square = numeric(),
+  df = numeric(),
+  p_value = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each categorical variable
+for (var in factor_cols) {
+  tbl <- table(ded[[var]], ded$Dry.Eye.Disease)
+  chi_test <- chisq.test(tbl)
+  
+  chi_results <- rbind(chi_results, data.frame(
+    Variable = var,
+    Chi_Square = chi_test$statistic,
+    df = chi_test$parameter,
+    p_value = chi_test$p.value
+  ))
+}
+
+# Sort by p-value
+chi_results_sorted <- chi_results[order(chi_results$p_value), ]
+
+# Top 5 important predictors (lowest p-values)
+top5_important <- head(chi_results_sorted, 5)
+
+# Top 5 least important predictors (highest p-values)
+top5_least <- tail(chi_results_sorted, 5)
+
+# Print results
+cat("Top 5 Important Predictors:\n")
+print(top5_important)
+
+cat("\nTop 5 Least Important Predictors:\n")
+print(top5_least)
+
+
+```
+
+```{r,remove_col,echo=FALSE}
+
+ded <- ded %>% select(-Medical.issue, -Wake.up.during.night)
+
+```
+
+## Data Cleaning and Shaping 
+
+```{r,check_missing,echo=FALSE}
+#colSums(is.na(ded))
+sum(is.na(ded))
+```
+
+
+
+```{r,zero,echo=FALSE}
+sapply(ded[, c("Sleep.duration","Daily.steps",
+               "Physical.activity","Heart.rate","Systolic","Diastolic","BMI")],
+       function(x) sum(x == 0))
+
+```
+
+```{r,unknown_variables,echo=FALSE}
+factor_cols <- names(ded)[sapply(ded, is.factor)]
+
+# Create a list to store tables
+factor_tables <- list()
+
+for (col in factor_cols) {
+  factor_tables[[col]] <- table(ded[[col]], useNA = "ifany")
+}
+
+
+```
+
+
+### Assessing Normality of Numeric Variables
+
+
+```{r,Normality,echo=FALSE}
+
+set.seed(123)  # for reproducibility
+
+# Select numeric columns
+numeric_cols <- sapply(ded, is.numeric)
+numeric_data <- ded[, numeric_cols]
+
+# Apply Shapiro-Wilk test on a random subset of 5000 rows for each column
+shapiro_results <- sapply(numeric_data, function(x) {
+  if(length(unique(x)) >= 3) {  
+    sample_x <- sample(x, size = min(5000, length(x)))  # subset 5000 rows
+    shapiro.test(sample_x)$p.value
+  } else {
+    NA  
+  }
+})
+
+```
+
+The Shapiro-Wilk test was performed to assess whether the numeric variables in the dataset follow a normal distribution, which is important for deciding on appropriate statistical methods or transformations. The test evaluates the null hypothesis that a variable is normally distributed. In this case, all numeric columns returned extremely small p-values, far below the 0.05 threshold, indicating that the null hypothesis is rejected for all variables. 
+
+**This result shows that none of the numeric columns are approximately normally distributed, suggesting that the data is highly skewed**. For tree-based models like Random Forest and XGBoost, this non-normality is not a concern, as they do not assume normally distributed predictors. However, **for logistic regression, extreme skewness may affect model performance, so transformations such as log1p or sqrt could be applied to improve stability and predictive power**.
+
+
+### Identification of Outlier 
+
+```{r,outlier,echo=TRUE}
+
+# Select numeric columns
+numeric_cols <- sapply(ded, is.numeric)
+numeric_data <- ded[, numeric_cols]
+
+# Function to count outliers using 1.5*IQR rule
+count_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25)
+  Q3 <- quantile(x, 0.75)
+  IQR <- Q3 - Q1
+  lower <- Q1 - 1.5 * IQR
+  upper <- Q3 + 1.5 * IQR
+  sum(x < lower | x > upper)
+}
+
+# Apply to all numeric columns
+outlier_counts <- sapply(numeric_data, count_outliers)
+
+# View results
+outlier_counts
+
+
+```
+
+```{r,transformation,echo=FALSE}
+
+# Copy dataset 
+ded_log <- ded
+
+ded_xg <- ded
+
+
+num_cols <- sapply(ded_log, is.numeric)
+ded_log[, num_cols] <- log1p(ded_log[, num_cols])
+
+
+```
+
+
+### Feature Encoding
+
+```{r,binary,echo=FALSE}
+encode_binary <- function(df) {
+  
+  # Identify binary factor columns except the target
+  binary_vars <- names(Filter(
+    function(x) is.factor(x) && nlevels(x) == 2, df
+  ))
+  binary_vars <- setdiff(binary_vars, "Dry.Eye.Disease")
+  
+  # Encode predictors (0/1)
+  for (v in binary_vars) {
+    df[[v]] <- ifelse(df[[v]] == levels(df[[v]])[1], 0, 1)
+  }
+  
+  # Encode target as 0/1
+  df$Dry.Eye.Disease <- ifelse(df$Dry.Eye.Disease == "Y", 1, 0)
+  
+  return(df)
+}
+
+# Apply to both datasets
+ded_log <- encode_binary(ded_log)
+ded_xg  <- encode_binary(ded_xg)
+
+```
+
+
+## Model Construction and Evaluation
+
+### Train-Test Split
+
+
+```{r,splitting,echo=FALSE}
+
+#Create the split index using one dataset (ded)
+set.seed(123)
+
+trainIndex <- createDataPartition(ded$Dry.Eye.Disease, p = 0.7, list = FALSE)
+
+#Split ded into train_rf and test_rf (Random Forest)
+train_rf <- ded[trainIndex, ]
+test_rf  <- ded[-trainIndex, ]
+
+#Split ded_log into train and test (Logistic Regression)
+train <- ded_log[trainIndex, ]
+test  <- ded_log[-trainIndex, ]
+
+#Split ded_xg into train_xg and test_xg (XGBoost)
+train_xg <- ded_xg[trainIndex, ]
+test_xg  <- ded_xg[-trainIndex, ]
+
+#Check class distributions for one 
+cat("\n Random Forest (ded)\n")
+cat("Training set class distribution:\n")
+print(prop.table(table(train_rf$Dry.Eye.Disease)))
+cat("\nTest set class distribution:\n")
+print(prop.table(table(test_rf$Dry.Eye.Disease)))
+
+
+```
+
+
+###  Baseline Logistic Regression: Training and Evaluation
+
+```{r,lr_base,echo=FALSE}
+
+
+#Prepare data
+
+# Ensure target factor levels are strings (caret requirement for SMOTE)
+train$Dry.Eye.Disease <- factor(train$Dry.Eye.Disease, levels = c(0,1), labels = c("No","Yes"))
+test$Dry.Eye.Disease  <- factor(test$Dry.Eye.Disease,  levels = c(0,1), labels = c("No","Yes"))
+
+
+#Set up trainControl with 5-fold CV and SMOTE
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,                       # 5-fold CV
+  sampling = "smote",               # SMOTE applied in each fold
+  classProbs = TRUE,                
+  summaryFunction = twoClassSummary 
+)
+
+
+#Train logistic regression with CV + SMOTE
+set.seed(123)
+log_model_cv <- train(
+  Dry.Eye.Disease ~ .,
+  data = train,
+  method = "glm",
+  family = binomial(),
+  trControl = ctrl,
+  metric = "ROC"  # optimize for ROC
+)
+
+
+```
+
+
+```{r,lr_base_pred,echo=TRUE}
+
+#Predict on test set
+
+pred_probs <- predict(log_model_cv, test, type = "prob")[, "Yes"] # probability of positive class
+pred_class <- predict(log_model_cv, test)# predicted class
+
+
+#Evaluate performance
+cm <- confusionMatrix(pred_class, test$Dry.Eye.Disease, positive = "Yes")
+
+# Extract metrics
+accuracy  <- cm$overall['Accuracy']
+precision <- cm$byClass['Pos Pred Value']
+recall    <- cm$byClass['Sensitivity']
+f1        <- 2 * (precision * recall) / (precision + recall)
+
+cat("\nConfusion Matrix:\n")
+print(cm$table)
+
+cat("\nMetrics:\n")
+cat("Accuracy :", round(accuracy, 3), "\n")
+cat("Precision:", round(precision, 3), "\n")
+cat("Recall   :", round(recall, 3), "\n")
+cat("F1 Score :", round(f1, 3), "\n")
+
+```
+
+The baseline logistic regression model demonstrates moderate predictive ability, reflected by an accuracy of `r round(accuracy, 3)`, indicating that around `r round(accuracy * 100, 1)`% of the test samples were classified correctly. **Precision of `r round(precision, 3)` suggests that when the model predicts “Yes” for Dry Eye Disease, the prediction is correct about `r round(precision * 100, 1)`% of the time**, reflecting relatively strong reliability for positive predictions. However, the recall of `r round(recall, 3)` shows that only about `r round(recall * 100, 1)`% of actual Dry Eye Disease cases were successfully identified, indicating that many positive cases were missed. 
+
+**The F1 score of `r round(f1, 3)`, which balances precision and recall**, confirms intermediate overall performance. These results are consistent with a baseline model trained without threshold adjustment or advanced tuning, and highlight opportunities for improvement, particularly in increasing sensitivity to better capture true positive cases.
+
+
+### Tuned Logistic regression: Training and Evaluation
+
+```{r,lr_tuned,echo=TRUE}
+
+# TrainControl with 5-fold CV and SMOTE
+ctrl_tuned <- trainControl(
+  method = "cv",
+  number = 5,
+  sampling = "smote",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Create Bagged Logistic Regression Function
+bagged_logistic_tuned <- function(train_data, B = 10) {
+  
+  models_tuned <- list()
+  
+  set.seed(123)
+  
+  for (b in 1:B) {
+    # Bootstrap sample
+    idx <- sample(1:nrow(train_data), replace = TRUE)
+    boot_sample <- train_data[idx, ]
+    
+    # Train logistic regression on bootstrap sample
+    model_b_tuned <- train(
+      Dry.Eye.Disease ~ .,
+      data = boot_sample,
+      method = "glm",
+      family = binomial(),
+      trControl = ctrl_tuned,
+      metric = "ROC"
+    )
+    
+    models_tuned[[b]] <- model_b_tuned
+    
+  }
+  
+  return(models_tuned)
+}
+
+# Train 10 bagged logistic regression models
+bag_log_models_tuned <- bagged_logistic_tuned(train, B = 10)
+
+# Predict on test set (averaging probabilities)
+test_probs_matrix_tuned <- sapply(bag_log_models_tuned, function(m) {
+  predict(m, test, type = "prob")[, "Yes"]
+})
+
+# Average predicted probability across all bagged models
+avg_pred_probs_tuned <- rowMeans(test_probs_matrix_tuned)
+
+# Apply threshold = 0.3
+threshold_tuned <- 0.3
+
+pred_class_bag_tuned <- ifelse(avg_pred_probs_tuned >= threshold_tuned, "Yes", "No")
+pred_class_bag_tuned <- factor(pred_class_bag_tuned, levels = c("No", "Yes"))
+
+# Evaluate final bagged performance
+cm_bag_tuned <- confusionMatrix(pred_class_bag_tuned, test$Dry.Eye.Disease, positive = "Yes")
+
+accuracy_bag_tuned  <- cm_bag_tuned$overall['Accuracy']
+precision_bag_tuned <- cm_bag_tuned$byClass['Pos Pred Value']
+recall_bag_tuned    <- cm_bag_tuned$byClass['Sensitivity']
+f1_bag_tuned        <- 2 * (precision_bag_tuned * recall_bag_tuned) / (precision_bag_tuned + recall_bag_tuned)
+
+cat("\nBagged Logistic Regression Metrics (Threshold = 0.3) - Tuned:\n")
+cat("Accuracy :", round(accuracy_bag_tuned, 3), "\n")
+cat("Precision:", round(precision_bag_tuned, 3), "\n")
+cat("Recall   :", round(recall_bag_tuned, 3), "\n")
+cat("F1 Score :", round(f1_bag_tuned, 3), "\n")
+
+
+```
+
+
+**The tuned logistic regression model incorporates two major enhancements: bagging and threshold adjustment**. Bagging (Bootstrap Aggregating) is implemented to reduce variance and stabilize predictions by training multiple logistic regression models on different bootstrap samples of the training dataset.
+
+**The bagged logistic regression model (threshold = 0.3) achieves accuracy `r round(accuracy_bag_tuned, 3)`, precision `r round(precision_bag_tuned, 3)`, recall `r round(recall_bag_tuned, 3)`, and F1 score `r round(f1_bag_tuned, 3)`**. High recall shows all true positives are captured, while moderate precision reflects some false positives. **SMOTE balanced the training folds, but the test set retains its original distribution**, so overprediction of the Yes class reduces precision. Bagging stabilizes predictions across bootstrap samples, improving recall and F1, while the threshold prioritizes capturing true positives.
+
+Compared to the baseline logistic regression model, the bagged and tuned logistic regression shows a substantial increase in recall, indicating that the model now captures almost all true positive cases.In medical datasets like this, prioritizing the identification of positive cases is critical, as failing to detect patients with the condition (false negatives) can have serious clinical consequences. Increasing recall ensures that most true cases are captured, even if it comes at the cost of some false positives
+
+### Baseline Random Forest Model: Training and Evaluation
+
+
+```{r,rf_baseline,echo=FALSE}
+#Set up trainControl with 5-fold CV
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,                 # 5-fold cross-validation
+  classProbs = TRUE,          
+  summaryFunction = twoClassSummary # for ROC, Sensitivity, Specificity
+)
+
+
+#Train baseline Random Forest model
+set.seed(123)
+rf_baseline <- train(
+  Dry.Eye.Disease ~ .,
+  data = train_rf,
+  method = "rf",
+  trControl = ctrl,
+  metric = "ROC",
+  ntree = 500 # number of trees
+)
+
+
+```
+
+
+```{r,rf_base_pred,echo=TRUE}
+#Predict on test set
+pred_probs <- predict(rf_baseline, test_rf, type = "prob")[, "Y"]
+pred_class <- predict(rf_baseline, test_rf)
+pred_class <- factor(pred_class, levels = levels(test_rf$Dry.Eye.Disease))
+
+
+#Evaluate performance
+cm <- confusionMatrix(pred_class, test_rf$Dry.Eye.Disease, positive = "Y")
+
+accuracy  <- cm$overall['Accuracy']
+precision <- cm$byClass['Pos Pred Value']
+recall    <- cm$byClass['Sensitivity']
+f1        <- 2 * (precision * recall) / (precision + recall)
+
+cat("\nConfusion Matrix:\n")
+print(cm$table)
+
+cat("\nMetrics:\n")
+cat("Accuracy :", round(accuracy, 3), "\n")
+cat("Precision:", round(precision, 3), "\n")
+cat("Recall   :", round(recall, 3), "\n")
+cat("F1 Score :", round(f1, 3), "\n")
+
+```
+
+**Random Forest was used as one of the model because it is an ensemble method that naturally performs bagging and introduces feature randomness, making it robust to noise and less prone to overfitting**. The code trains a Random Forest using 5-fold cross-validation to ensure stable performance estimation, with probability outputs enabled for ROC-based evaluation. 
+
+**The model achieves an accuracy of `r round(accuracy, 3)`, precision of `r round(precision, 3)`, recall of `r round(recall, 3)`, and an F1 score of `r round(f1, 3)`**.
+
+The exceptionally high recall indicates that the model is highly effective at identifying positive Dry Eye Disease cases, making it useful in scenarios where missing true cases carries greater risk. Although precision is moderate, the strong recall leads to a high F1 score, reflecting a favorable balance between false positives and false negatives. 
+
+
+### Tuned Random Forest Model: Training and Evaluation
+
+```{r,rf_tuned,echo=TRUE}
+
+#TrainControl with SMOTE + 5-fold CV
+ctrl_rf_tuned <- trainControl(
+  method = "cv",
+  number = 5,
+  sampling = "smote",         # SMOTE applied inside each fold
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+
+#Train Random Forest 
+set.seed(123)
+
+rf_model_tuned <- train(
+  Dry.Eye.Disease ~ .,
+  data = train_rf,
+  method = "rf",
+  trControl = ctrl_rf_tuned,
+  metric = "ROC",
+  ntree = 600,                          # fixed number of trees
+  tuneGrid = expand.grid(mtry = 3)      # fixed mtry
+)
+
+
+#Predictions on test set
+pred_probs_rf_tuned <- predict(rf_model_tuned, test_rf, type = "prob")[,"Y"]
+pred_class_rf_tuned <- predict(rf_model_tuned, test_rf)
+pred_class_rf_tuned <- factor(pred_class_rf_tuned, levels = levels(test_rf$Dry.Eye.Disease))
+
+
+#Evaluate performance
+cm_rf_tuned <- confusionMatrix(pred_class_rf_tuned, test_rf$Dry.Eye.Disease, positive = "Y")
+
+accuracy_rf_tuned  <- cm_rf_tuned$overall['Accuracy']
+precision_rf_tuned <- cm_rf_tuned$byClass['Pos Pred Value']
+recall_rf_tuned    <- cm_rf_tuned$byClass['Sensitivity']
+f1_rf_tuned        <- 2 * (precision_rf_tuned * recall_rf_tuned) / (precision_rf_tuned + recall_rf_tuned)
+
+cat("\nConfusion Matrix:\n")
+print(cm_rf_tuned$table)
+
+cat("\nMetrics:\n")
+cat("Accuracy :", round(accuracy_rf_tuned, 3), "\n")
+cat("Precision:", round(precision_rf_tuned, 3), "\n")
+cat("Recall   :", round(recall_rf_tuned, 3), "\n")
+cat("F1 Score :", round(f1_rf_tuned, 3), "\n")
+
+
+```
+
+
+The tuned Random Forest shows improvements in overall accuracy (`r round(accuracy_rf_tuned, 3)`) and F1-score (`r round(f1_rf_tuned, 3)`) compared with the untuned baseline accuracy (`r round(accuracy, 3)`) and F1 (`r round(f1, 3)`), indicating better balanced classification performance. **Precision increases from `r round(precision, 3)` to `r round(precision_rf_tuned, 3)`, meaning the tuned model produces fewer false positives relative to its positive predictions**. Recall decreases slightly from `r round(recall, 3)` to `r round(recall_rf_tuned, 3)`, but the difference is modest and still maintains strong sensitivity, while producing a **more stable balance between detecting true cases and avoiding unnecessary positive classifications**.
+
+
+This trade-off is expected because tuning adjusts the behavior of individual trees to reduce overfitting. The improvement arises from optimizing mtry, where the tuned setting (mtry = 3) allows each split to consider fewer features than the default (mtry = 5), increasing randomness and decorrelation among trees, which reduces variance and improves generalization on the test set. 
+
+### Baseline Xgboost Model:Training and Evaluation
+
+```{r,xg_baseline,echo=FALSE}
+
+train_xg$Dry.Eye.Disease <- factor(train_xg$Dry.Eye.Disease, levels = c(0,1), labels = c("No","Yes"))
+test_xg$Dry.Eye.Disease  <- factor(test_xg$Dry.Eye.Disease, levels = c(0,1), labels = c("No","Yes"))
+
+
+#TrainControl with SMOTE + 5-fold CV
+ctrl_xgb <- trainControl(
+  method = "cv",
+  number = 5,
+  sampling = "smote",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+
+#Baseline XGBoost Model
+set.seed(123)
+
+xgb_model <- train(
+  Dry.Eye.Disease ~ .,
+  data = train_xg,
+  method = "xgbTree",
+  trControl = ctrl_xgb,
+  metric = "ROC",   # optimize for ROC
+  tuneLength = 1     #  baseline (no tuning yet)
+)
+
+
+```
+
+
+
+```{r,xgboost_base_pred,echo=TRUE}
+#Predictions on Test Set
+# Probabilities for positive class
+pred_probs_xgb <- predict(xgb_model, test_xg, type = "prob")[, "Yes"]
+
+# Predicted classes
+pred_class_xgb <- predict(xgb_model, test_xg)
+pred_class_xgb <- factor(pred_class_xgb, levels = levels(test_xg$Dry.Eye.Disease))
+
+
+#Evaluation Metrics
+cm_xgb <- confusionMatrix(pred_class_xgb, test_xg$Dry.Eye.Disease, positive = "Yes")
+
+accuracy_xgb  <- cm_xgb$overall['Accuracy']
+precision_xgb <- cm_xgb$byClass['Pos Pred Value']
+recall_xgb    <- cm_xgb$byClass['Sensitivity']
+f1_xgb        <- 2 * (precision_xgb * recall_xgb) / (precision_xgb + recall_xgb)
+
+cat("\nConfusion Matrix:\n")
+print(cm_xgb$table)
+
+cat("\nXGBoost Metrics:\n")
+cat("Accuracy :", round(accuracy_xgb, 3), "\n")
+cat("Precision:", round(precision_xgb, 3), "\n")
+cat("Recall   :", round(recall_xgb, 3), "\n")
+cat("F1 Score :", round(f1_xgb, 3), "\n")
+```
+
+### Tuned Xgboost Model: Training and Evaluation
+
+```{r,xg_tuned,echo=TRUE}
+
+# 5 fold CV and SMOTE
+ctrl_xgb_tuned <- trainControl(
+  method = "cv",
+  number = 5,
+  sampling = "smote",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  verboseIter = FALSE,
+  allowParallel = TRUE
+)
+
+xgb_grid_tuned <- expand.grid(
+  nrounds = 120,         # fixed number of trees
+  max_depth = 4,         # fixed tree depth
+  eta = 0.1,             # learning rate
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.8
+)
+
+# Train
+set.seed(123)
+xgb_model_tuned <- train(
+  Dry.Eye.Disease ~ .,
+  data = train_xg,
+  method = "xgbTree",
+  metric = "ROC",
+  trControl = ctrl_xgb_tuned,
+  tuneGrid = xgb_grid_tuned,
+  verbose = 0
+)
+
+# Predict with custom threshold
+threshold_tuned <- 0.5
+pred_probs_tuned <- predict(xgb_model_tuned, test_xg, type = "prob")[, "Yes"]
+pred_class_tuned <- ifelse(pred_probs_tuned >= threshold_tuned, "Yes", "No")
+pred_class_tuned <- factor(pred_class_tuned, levels = levels(test_xg$Dry.Eye.Disease))
+
+cm_tuned <- confusionMatrix(pred_class_tuned, test_xg$Dry.Eye.Disease, positive = "Yes")
+
+accuracy_tuned  <- cm_tuned$overall["Accuracy"]
+precision_tuned <- cm_tuned$byClass["Pos Pred Value"]
+recall_tuned    <- cm_tuned$byClass["Sensitivity"]
+f1_tuned        <- 2 * (precision_tuned * recall_tuned) / (precision_tuned + recall_tuned)
+
+# PRINT METRICS
+cat("\nXGBoost Metrics Tuned (Threshold =", threshold_tuned, "):\n")
+cat("Accuracy :", round(accuracy_tuned, 3), "\n")
+cat("Precision:", round(precision_tuned, 3), "\n")
+cat("Recall   :", round(recall_tuned, 3), "\n")
+cat("F1 Score :", round(f1_tuned, 3), "\n")
+
+
+
+```
+
+
+The tuned XGBoost model shows a modest but meaningful improvement over the baseline. Accuracy increases from `r round(accuracy_xgb, 3)` (`r round(accuracy_xgb*100,1)`%) to `r round(accuracy_tuned, 3)` (`r round(accuracy_tuned*100,1)`%), and the **F1 score improves from `r round(f1_xgb, 3)` to `r round(f1_tuned, 3)`,indicating a better overall balance between precision and recall**. Precision remains similar, increasing slightly from `r round(precision_xgb, 3)` to `r round(precision_tuned, 3)`, while recall improves from `r round(recall_xgb, 3)` to `r round(recall_tuned, 3)`, showing that the tuned model becomes slightly better at correctly identifying positive cases. Although the improvements are modest, they demonstrate that controlled tuning with essential hyperparameters and 5-fold cross-validation helps the model generalize better while maintaining computational efficiency.
+
+
+## Heterogeneous weighted stacking ensemble
+
+
+```{r,check_stacking,echo=FALSE}
+# Check if row order matches across test sets
+
+alignment1 <- all.equal(rownames(test), rownames(test_rf))
+alignment2 <- all.equal(rownames(test), rownames(test_xg))
+
+
+```
+
+
+
+```{r,stacking,echo=TRUE}
+# Weighted stacking ensemble function
+weighted_ensemble <- function(prob_rf_tuned, prob_xgb_tuned, prob_lr_bagged, 
+                              test_labels,
+                              w_rf = 0.5, w_xgb = 0.3, w_lr = 0.2, threshold = 0.5) {
+  
+  # Compute weighted probabilities
+  stacked_probs <- (w_rf * as.numeric(prob_rf_tuned)) + 
+                   (w_xgb * as.numeric(prob_xgb_tuned)) + 
+                   (w_lr * as.numeric(prob_lr_bagged))
+  
+  # Convert probabilities to class labels
+  pred_class <- ifelse(stacked_probs >= threshold, "Yes", "No")
+  pred_class <- factor(pred_class, levels = c("No", "Yes"))
+  
+  # Evaluate performance
+  cm <- confusionMatrix(pred_class, test_labels, positive = "Yes")
+  
+  # Extract metrics
+  accuracy_stacked  <- cm$overall['Accuracy']
+  precision_stacked <- cm$byClass['Pos Pred Value']
+  recall_stacked    <- cm$byClass['Sensitivity']
+  f1_stacked        <- 2 * (precision_stacked * recall_stacked) / 
+                          (precision_stacked + recall_stacked)
+  
+  # Print confusion matrix and metrics
+  cat("\nConfusion Matrix:\n")
+  print(cm$table)
+  
+  cat("\nWeighted Stacking Ensemble Metrics:\n")
+  cat("Accuracy :", round(accuracy_stacked, 3), "\n")
+  cat("Precision:", round(precision_stacked, 3), "\n")
+  cat("Recall   :", round(recall_stacked, 3), "\n")
+  cat("F1 Score :", round(f1_stacked, 3), "\n")
+  
+  # Return predictions + metrics
+  return(list(
+    predictions = pred_class,
+    accuracy = accuracy_stacked,
+    precision = precision_stacked,
+    recall = recall_stacked,
+    f1 = f1_stacked
+  ))
+}
+
+stacked_results <- weighted_ensemble(
+  pred_probs_rf_tuned, 
+  pred_probs_tuned, 
+  avg_pred_probs_tuned, 
+  test$Dry.Eye.Disease
+)
+
+
+
+```
+
+
+
+This function is a weighted stacking ensemble that combines predictions from three models Random Forest, XGBoost, and bagged Logistic Regression into a single prediction. It takes the predicted probabilities from each model, multiplies them by user-defined weights, and computes a weighted average. This average probability is then converted into class labels using a threshold (default 0.5). The function evaluates the predictions against the true test labels, prints the confusion matrix, and reports performance metrics like accuracy, precision, recall, and F1 score. It also returns the predicted classes for further use.
+
+**The weighted ensemble ultimately achieves the strongest results overall, with an accuracy of `r round(stacked_results$accuracy, 3)`, precision `r round(stacked_results$precision, 3)`, recall `r round(stacked_results$recall, 3)`, and an F1 score of `r round(stacked_results$f1, 3)`.**
+
+This performance surpasses each individual model, demonstrating the benefit of integrating complementary strengths across algorithms. The ensemble maintains excellent recall crucial for identifying true Dry Eye Disease cases in a medical contextm while achieving balanced precision and robust overall performance. Together, these results confirm that the heterogeneous ensemble is the most reliable and clinically meaningful model, providing a strong conclusion to the project.
+
+
+## Conclusion
+
+This project successfully developed, tuned, and evaluated multiple machine learning models- Logistic Regression, Random Forest, and XGBoost,to predict Dry Eye Disease. Each model was trained using 5-fold cross-validation with SMOTE to address class imbalance and evaluated using a hold-out test set that preserved the dataset’s original distribution.**
+
+Overall, the project demonstrates a complete machine-learning pipeline—data balancing, model training, hyperparameter tuning, evaluation, and ensemble learning—resulting in a strong, generalizable classifier for Dry Eye Disease prediction.
