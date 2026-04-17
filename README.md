@@ -75,7 +75,7 @@ The analysis addresses class imbalance, evaluates multiple ML models, and culmin
 
 ---
 
-## 🛠️ Tools & Technologies
+##  Tools & Technologies
 
 - **Language:** R
 - **Format:** R Markdown (`.Rmd`) → HTML
@@ -83,11 +83,11 @@ The analysis addresses class imbalance, evaluates multiple ML models, and culmin
 
 ---
 
-## ▶️ How to Run
+## How to Run
 
 1. Clone this repository:
 ```bash
-   git clone https://github.com/<your-username>/dry-eye-disease-ml-prediction.git
+   git clone https://github.com/harshi-vvm/dry-eye-disease-ml-prediction.git
 ```
 2. Open `ded_pred.Rmd` in RStudio
 3. Install required packages (if not already installed)
@@ -96,6 +96,6 @@ The analysis addresses class imbalance, evaluates multiple ML models, and culmin
 ---
 
 
-## 📬 Contact
+## Contact
 
 For questions or feedback, feel free to reach out via GitHub Issues.
